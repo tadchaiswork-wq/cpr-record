@@ -626,7 +626,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-se
       <div class="sum-pt" id="sum-pt">—</div>
     </div>
     <div class="sum-hdr-btns">
-      <button class="sum-hdr-btn" onclick="window.print()">🖨 Print</button>
       <button class="sum-hdr-btn" onclick="goHome()">🏠 Home</button>
     </div>
   </div>
@@ -680,7 +679,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-se
     </div>
 
     <div class="sum-card" id="rosc-card">
-      <h4>📊 V/S หลัง ROSC <span style="font-weight:500;text-transform:none;color:var(--muted)">· กรอกเอง — ตัวเลขจางคือค่า normal · กด −/+ หรือพิมพ์ได้</span></h4>
+      <h4>📊 V/S หลัง ROSC <span style="font-weight:500;text-transform:none;color:var(--muted)">· กรอกเอง — ตัวเลขจางคือค่า normal</span></h4>
       <div id="rosc-vs-container"></div>
     </div>
 
@@ -689,8 +688,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-se
       <textarea class="note-area" id="s-note" placeholder="บันทึกเพิ่มเติม..."></textarea>
     </div>
 
-    <button class="sum-print-btn" onclick="saveThenPrint()">🖨 บันทึก & พิมพ์</button>
-    <button class="sum-print-btn" onclick="saveThenDownload()" style="background:var(--ok);margin-top:10px">⬇️ บันทึก & ดาวน์โหลด PDF</button>
+    <button class="sum-print-btn" onclick="saveSummaryOnly()">💾 บันทึก</button>
     <button class="sum-new-btn"   onclick="goHome()">🏠 กลับ Dashboard</button>
     <div style="height:32px"></div>
   </div>
@@ -1002,7 +1000,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-se
         </select>
       </div>
       <div id="cd-vs-wrap" style="display:none">
-        <div class="form-label">📊 V/S หลัง ROSC — กรอกเอง (ตัวเลขจางคือค่า normal) · กด −/+ หรือพิมพ์ได้</div>
+        <div class="form-label">📊 V/S หลัง ROSC — กรอกเอง (ตัวเลขจางคือค่า normal)</div>
         <div id="cd-vs-container"></div>
       </div>
       <div>
@@ -1052,6 +1050,17 @@ const RHYTHM_INTERVAL_MIN = 2;
 const SOUND_WARN_SEC = 10;   // seconds before rhythm check
 const ADR_PREWARN_SEC = 20;  // เตือนก่อนถึงเวลา Adrenaline (วินาที)
 let adrPreWarnTs = null;     // กันเสียงเตือน adr ซ้ำในรอบเดียวกัน
+
+// ── Active CPR ข้ามเครื่อง (ผ่าน Firebase) ──
+const DEVICE_ID=(()=>{             // id ประจำเครื่อง
+  try{
+    let d=localStorage.getItem('cpr_device_id');
+    if(!d){ d='dev-'+Math.random().toString(36).slice(2,10); localStorage.setItem('cpr_device_id',d); }
+    return d;
+  }catch(e){ return 'dev-'+Math.random().toString(36).slice(2,10); }
+})();
+let remoteActive=null;             // active CPR จากเครื่องอื่น
+let remoteDismissedId=null;        // เคสที่ผู้ใช้กด "ไม่ใช่ตอนนี้" แล้ว
 
 // ════════════════════════════════════════
 // STATE
@@ -1193,6 +1202,13 @@ function soundShockable(){ beep(800,.08); setTimeout(()=>beep(1200,.08),120); se
 function autoSave(){
   if(!S.startTime||S.stopTime) return;
   try{ localStorage.setItem('cpr_active',JSON.stringify(S)); }catch(e){}
+  // sync เคสที่กำลังบันทึกไป Firebase ให้เครื่องอื่นเห็นและถามบันทึกต่อได้
+  if(fbRef){
+    try{
+      const data=JSON.parse(JSON.stringify(S,(k,v)=>k==='timerID'?null:v));
+      fbRef.child('active').set({device:DEVICE_ID,updatedAt:Date.now(),data});
+    }catch(e){}
+  }
 }
 
 function checkInterruptedSession(){
@@ -1206,6 +1222,7 @@ function checkInterruptedSession(){
 }
 
 function showRestoreBanner(data){
+  resetDiscardBtn();
   const dur=Math.floor((Date.now()-new Date(data.startTime).getTime())/60000);
   $('restore-title').textContent='⚠️ พบ CPR Session ที่ยังค้างอยู่!';
   $('restore-info').innerHTML=`ผู้ป่วย: <b>${data.patientName}</b>${data.hn?' · HN: '+data.hn:''}<br>เริ่ม CPR: <b>${fmtTime(data.startTime)}</b> · ผ่านไป <b>${dur} นาที</b><br>Adrenaline: <b>${data.adrCount} ครั้ง</b> · Defib: <b>${data.defibCount} ครั้ง</b>`;
@@ -1237,7 +1254,11 @@ function resumeSession(){
 
 function discardSession(){
   if(!confirm('ลบ session ที่ค้างอยู่?')) return;
+  let did=null;
+  try{ did=JSON.parse(localStorage.getItem('cpr_active')||'{}').id; }catch(e){}
   try{ localStorage.removeItem('cpr_active'); }catch(e){}
+  // ถ้าเคสเดียวกันค้างอยู่บน Firebase ให้เคลียร์ด้วย
+  if(fbRef&&did&&remoteActive?.data?.id===did){ try{ fbRef.child('active').remove(); }catch(e){} }
   $('restore-banner').style.display='none';
 }
 
@@ -1377,6 +1398,16 @@ function initFirebase(){
     }, err=>{
       console.warn('[Firebase] listener error:',err);
       updateFBStatus('err');
+    });
+
+    // Active-case listener — เคสที่เครื่องอื่นกำลังบันทึกอยู่
+    fbRef.child('active').on('value', snap=>{
+      remoteActive=snap.val()||null;
+      // ถ้าอยู่หน้า dashboard และมีเคสค้างจากเครื่องอื่น → ถามทันที
+      if($('screen-home').classList.contains('active') && !(S.startTime&&!S.stopTime) && !checkInterruptedSession()){
+        if(remoteActiveValid()) showRemoteActiveBanner();
+        else if(!remoteActive) $('restore-banner').style.display='none';
+      }
     });
 
     // Tombstone listener — เคสที่เครื่องอื่นลบ ให้ลบตามด้วย
@@ -1531,10 +1562,49 @@ function goHome(){
   } else {
     const interrupted=checkInterruptedSession();
     if(interrupted) showRestoreBanner(interrupted);
+    else if(remoteActiveValid()) showRemoteActiveBanner();
     else $('restore-banner').style.display='none';
   }
 }
+
+// ── เคสค้างจากเครื่องอื่น (ผ่าน Firebase) ──
+function remoteActiveValid(){
+  if(!remoteActive||!remoteActive.data) return false;
+  if(remoteActive.device===DEVICE_ID) return false;              // ของเครื่องนี้เอง
+  const d=remoteActive.data;
+  if(!d.startTime||d.stopTime||!d.id) return false;
+  if(d.id===remoteDismissedId) return false;                     // กด "ไม่ใช่ตอนนี้" ไปแล้ว
+  if(Date.now()-(remoteActive.updatedAt||0)>6*60*60*1000) return false; // เก่ากว่า 6 ชม.
+  if((DB.sessions||[]).some(s=>s.id===d.id&&s.stopTime)) return false;  // เคสจบไปแล้ว
+  if(isDeleted(d.id)) return false;
+  return true;
+}
+function showRemoteActiveBanner(){
+  const d=remoteActive.data;
+  const dur=Math.floor((Date.now()-new Date(d.startTime).getTime())/60000);
+  $('restore-title').textContent='📱 มี CPR กำลังบันทึกอยู่ที่เครื่องอื่น — บันทึกต่อเคสเดิมไหม?';
+  $('restore-info').innerHTML=`ผู้ป่วย: <b>${d.patientName||'—'}</b>${d.hn?' · HN: '+d.hn:''}<br>เริ่ม CPR: <b>${fmtTime(d.startTime)}</b> · ผ่านไป <b>${dur} นาที</b> · Adrenaline <b>${d.adrCount||0}</b> ครั้ง · Defib <b>${d.defibCount||0}</b> ครั้ง`;
+  const btn=$('restore-discard-btn');
+  btn.style.display='';
+  btn.textContent='✕ ไม่ใช่ตอนนี้';
+  btn.onclick=()=>{ remoteDismissedId=d.id; $('restore-banner').style.display='none'; };
+  $('restore-banner').style.display='block';
+}
+function resumeRemoteSession(){
+  if(!remoteActiveValid()) return;
+  const data=JSON.parse(JSON.stringify(remoteActive.data));
+  data.timerID=null;
+  try{ localStorage.setItem('cpr_active',JSON.stringify(data)); }catch(e){}
+  resumeSession();   // โหลดต่อจาก localStorage เหมือน restore ปกติ
+}
+function resetDiscardBtn(){
+  const btn=$('restore-discard-btn');
+  btn.textContent='🗑 ลบทิ้ง';
+  btn.onclick=discardSession;
+}
+
 function showOngoingBanner(){
+  resetDiscardBtn();
   const dur=Math.floor((Date.now()-new Date(S.startTime).getTime())/60000);
   $('restore-title').textContent='⏱ CPR กำลังบันทึกอยู่ — ยังไม่จบเคส';
   $('restore-info').innerHTML=`ผู้ป่วย: <b>${S.patientName}</b>${S.hn?' · HN: '+S.hn:''}<br>เริ่ม CPR: <b>${fmtTime(S.startTime)}</b> · ผ่านไป <b>${dur} นาที</b> · Adrenaline <b>${S.adrCount}</b> ครั้ง · Defib <b>${S.defibCount}</b> ครั้ง`;
@@ -1548,7 +1618,8 @@ function resumeOngoing(){
     scrollToNow();
     return;
   }
-  resumeSession();
+  if(checkInterruptedSession()){ resumeSession(); return; }
+  resumeRemoteSession();   // เคสค้างจากเครื่องอื่น
 }
 function goSetup(){
   if(S.startTime&&!S.stopTime){
@@ -2397,6 +2468,10 @@ function endCPR(){
   stopAlarm();
   $('shockable-banner').classList.remove('show');
   try{ localStorage.removeItem('cpr_active'); }catch(e){}
+  // เคลียร์ active บน Firebase ถ้าเป็นเคสนี้ (ทุกเครื่องจะเลิกถาม)
+  if(fbRef){ try{
+    if(!remoteActive||remoteActive.device===DEVICE_ID||remoteActive.data?.id===S.id) fbRef.child('active').remove();
+  }catch(e){} }
   buildSummary();
   showScreen('screen-summary');
 }
@@ -2422,30 +2497,75 @@ function buildSummary(){
 }
 
 function buildQuality(totalMin){
+  // ── เกณฑ์ Quality CPR ที่ดีจริง (3 ข้อ) ──
+  // 1. Defib ภายใน 2 นาทีหลังมีข้อบ่งชี้ (เจอ VF/pVT)
+  // 2. Adrenaline ทุก dose ห่างกัน 3–5 นาที
+  // 3. EtCO2 เฉลี่ย ≥ 10 mmHg
   const items=[];
+  let passed=0, applicable=0;
+
+  // 1) Defib ≤ 2 นาทีหลังเจอ shockable rhythm
+  const shockMins=Object.entries(S.rhythmData)
+    .filter(([,v])=>v.rhythm==='VF'||v.rhythm==='pVT')
+    .map(([k])=>parseInt(k));
+  if(shockMins.length){
+    applicable++;
+    const indMin=Math.min(...shockMins);
+    const dfMins=S.events.filter(e=>e.type==='defib'&&e.minute>=indMin).map(e=>e.minute);
+    const firstDf=dfMins.length?Math.min(...dfMins):null;
+    const ok=firstDf!=null&&(firstDf-indMin)<=2;
+    if(ok) passed++;
+    items.push({lbl:'Defib หลังมีข้อบ่งชี้',
+      val:firstDf!=null?`${firstDf-indMin} min`:'ไม่ได้ shock',
+      cls:ok?'q-good':'q-bad',
+      note:ok?'✅ ภายใน 2 นาที':'❌ Target ≤ 2 นาทีหลังเจอ VF/pVT'});
+  }
+
+  // 2) Adrenaline interval 3–5 นาทีทุก dose
   const adrEvs=S.events.filter(e=>e.type==='adr');
   if(adrEvs.length>=2){
-    const mins=adrEvs.map(e=>e.minute);
+    applicable++;
+    const mins=adrEvs.map(e=>e.minute).sort((a,b)=>a-b);
     const gaps=[];
     for(let i=1;i<mins.length;i++) gaps.push(mins[i]-mins[i-1]);
     const avg=gaps.reduce((a,b)=>a+b,0)/gaps.length;
-    const ok=Math.abs(avg-ADR_INTERVAL_MIN)<=1;
-    items.push({lbl:'Adrenaline interval',val:`${avg.toFixed(1)} min`,cls:ok?'q-good':'q-warn',note:ok?'✅ ตรงตาม protocol':`⚠️ Target ${ADR_INTERVAL_MIN} min`});
+    const ok=gaps.every(g=>g>=3&&g<=5);
+    if(ok) passed++;
+    items.push({lbl:'Adrenaline interval',val:`เฉลี่ย ${avg.toFixed(1)} min`,
+      cls:ok?'q-good':'q-warn',
+      note:ok?'✅ ทุก dose ห่าง 3–5 นาที':'⚠️ Target 3–5 นาทีทุก dose'});
+  } else if(adrEvs.length===1){
+    items.push({lbl:'Adrenaline interval',val:'ให้ 1 ครั้ง',cls:'',note:'ประเมิน interval ไม่ได้'});
   }
+
+  // 3) EtCO2 เฉลี่ย ≥ 10
   const etVals=Object.values(S.rhythmData).map(r=>parseFloat(r.etco2)).filter(v=>!isNaN(v)&&v>0);
+  let etAvg=null;
   if(etVals.length){
-    const avg=etVals.reduce((a,b)=>a+b,0)/etVals.length;
-    items.push({lbl:'EtCO2 เฉลี่ย',val:`${avg.toFixed(0)} mmHg`,cls:avg>=10?'q-good':'q-bad',note:avg>=10?'✅ CPR quality ดี':'❌ Reassess CPR!'});
+    applicable++;
+    etAvg=etVals.reduce((a,b)=>a+b,0)/etVals.length;
+    const ok=etAvg>=10;
+    if(ok) passed++;
+    items.push({lbl:'EtCO2 เฉลี่ย',val:`${etAvg.toFixed(0)} mmHg`,
+      cls:ok?'q-good':'q-bad',
+      note:ok?'✅ ≥ 10 mmHg':'❌ < 10 mmHg — Reassess CPR!'});
   }
+
+  // ข้อมูลประกอบ (ไม่คิดคะแนน)
   const ex=Math.max(1,Math.floor(totalMin/RHYTHM_INTERVAL_MIN));
   const ac=Object.values(S.rhythmData).filter(r=>r.rhythm).length;
   items.push({lbl:'Rhythm checks',val:`${ac}/${ex}`,cls:ac>=ex?'q-good':'q-warn',note:ac<ex?'⚠️ ตรวจน้อยกว่า protocol':''});
   items.push({lbl:'Adrenaline รวม',val:`${S.adrCount} amps`,cls:'',note:''});
 
-  // Save quality to session
-  const etAvg=etVals.length?etVals.reduce((a,b)=>a+b,0)/etVals.length:null;
-  const qualScore=[etAvg>=10, ac>=ex, S.adrCount>0].filter(Boolean).length;
-  S.quality={etco2Avg:etAvg?.toFixed(0)||null,rhythmChecks:ac,adrCount:S.adrCount,qualScore,totalMin};
+  // สรุปหัวตาราง
+  items.unshift({lbl:'สรุป Quality',
+    val:applicable?`ผ่าน ${passed}/${applicable} ข้อ`:'—',
+    cls:applicable&&passed===applicable?'q-good':passed>=1?'q-warn':'q-bad',
+    note:applicable&&passed===applicable?'✅ CPR quality ดีจริง':'เกณฑ์: DF≤2 นาที · Adr 3–5 นาที · EtCO2 ≥10'});
+
+  // Save quality to session — 3 = ผ่านครบทุกข้อที่ประเมินได้
+  const qualScore=applicable>0?(passed===applicable?3:Math.min(2,passed)):null;
+  S.quality={etco2Avg:etAvg!=null?etAvg.toFixed(0):null,rhythmChecks:ac,adrCount:S.adrCount,qualScore,qualPassed:passed,qualApplicable:applicable,totalMin};
 
   $('q-grid').innerHTML=items.map(it=>`
     <div class="q-item">
@@ -2529,22 +2649,8 @@ const VS_FIELDS=[
 function vsGridHTML(p){
   return `<div class="v-grid">`+VS_FIELDS.map(f=>`
     <div class="v-grp"><span class="v-lbl">${f.lbl}</span>
-      <div class="v-step">
-        <button type="button" class="v-stepbtn" onclick="vsStep('${p}-${f.id}',-1)">−</button>
-        <input type="number" class="v-inp" id="${p}-${f.id}" data-def="${f.def}" data-step="${f.step}" data-dec="${f.dec}" data-min="${f.min}" data-max="${f.max}" step="${f.step}" inputmode="decimal" placeholder="${f.def}">
-        <button type="button" class="v-stepbtn" onclick="vsStep('${p}-${f.id}',1)">+</button>
-      </div>
+      <input type="number" class="v-inp" id="${p}-${f.id}" data-def="${f.def}" data-min="${f.min}" data-max="${f.max}" step="${f.step}" inputmode="decimal" placeholder="${f.def}">
     </div>`).join('')+`</div>`;
-}
-function vsStep(id,dir){
-  const inp=$(id); if(!inp) return;
-  const st=parseFloat(inp.dataset.step)||1, dec=parseInt(inp.dataset.dec)||0;
-  const mn=parseFloat(inp.dataset.min), mx=parseFloat(inp.dataset.max);
-  let v=parseFloat(inp.value);
-  if(isNaN(v)) v=parseFloat(inp.dataset.def)||0;   // ช่องว่าง → เริ่มที่ค่า normal
-  else v+=dir*st;
-  v=Math.min(mx,Math.max(mn,v));
-  inp.value=v.toFixed(dec);
 }
 function vsFillDefaults(p){
   VS_FIELDS.forEach(f=>{
@@ -2742,6 +2848,13 @@ function buildPrintPages(){
     </div>`;
 }
 
+function saveSummaryOnly(){
+  S.notes=$('s-note').value;
+  S.vitalROSC=vsRead('r');
+  saveSession(S);
+  syncSession(S);
+  alert('บันทึกแล้ว ✅');
+}
 function saveThenPrint(){
   S.notes=$('s-note').value;
   S.vitalROSC=vsRead('r');
@@ -2788,7 +2901,7 @@ function renderDashboard(){
   const rosc=thisMonth.filter(s=>s.outcome==='ROSC').length;
   const roscN=thisMonth.length;
   const roRate=roscN?`${Math.round(rosc/roscN*100)}%`:'—';
-  const good=thisMonth.filter(s=>s.quality&&s.quality.qualScore>=2).length;
+  const good=thisMonth.filter(s=>s.quality&&s.quality.qualScore>=3).length;
   const goodN=thisMonth.length;
   const gRate=goodN?`${Math.round(good/goodN*100)}%`:'—';
 
@@ -2809,8 +2922,8 @@ function renderDashboard(){
       const dur=s.stopTime&&s.startTime?Math.floor((new Date(s.stopTime)-new Date(s.startTime))/60000)+' min':'—';
       const hn=s.hn?` · HN: ${s.hn}`:'';
       const qs=s.quality?.qualScore;
-      const qBadge=qs>=2?'qb-good':qs===1?'qb-warn':'qb-bad';
-      const qLabel=qs>=2?'Quality ดี':qs===1?'พอใช้':'ไม่ดี';
+      const qBadge=qs>=3?'qb-good':qs>=1?'qb-warn':'qb-bad';
+      const qLabel=qs>=3?'Quality ดี':qs>=1?'พอใช้':'ไม่ดี';
       return `<div class="case-item" onclick="openCaseDetail('${s.id}')">
         <div class="case-item-top">
           <div><div class="case-name">${s.patientName}${hn}</div><div class="case-hn">${fmtDateTime(s.startTime)}</div></div>
@@ -2854,8 +2967,8 @@ function openCaseDetail(id){
   const oc=s.outcome||'';
   const ocColor=oc==='ROSC'?'var(--ok)':oc==='DEAD'?'var(--danger)':'var(--muted)';
   const qs=s.quality?.qualScore;
-  const qLabel=qs>=2?'ดี':qs===1?'พอใช้':qs===0?'ต้องปรับ':'—';
-  const qColor=qs>=2?'var(--ok)':qs===1?'var(--warn)':qs===0?'var(--danger)':'var(--muted)';
+  const qLabel=qs>=3?'ดี':qs>=1?'พอใช้':qs===0?'ต้องปรับ':'—';
+  const qColor=qs>=3?'var(--ok)':qs>=1?'var(--warn)':qs===0?'var(--danger)':'var(--muted)';
   const statBox=(val,lbl,color='var(--navy)')=>
     `<div style="background:var(--bg);border-radius:10px;padding:10px 6px;text-align:center">
       <div style="font-size:22px;font-weight:800;color:${color}">${val}</div>
@@ -3124,7 +3237,7 @@ function renderAdminContent(){
 
   const sessions=DB.sessions||[];
   const rosc=sessions.filter(s=>s.outcome==='ROSC').length;
-  const good=sessions.filter(s=>s.quality?.qualScore>=2).length;
+  const good=sessions.filter(s=>s.quality?.qualScore>=3).length;
   $('admin-stats').innerHTML=`
     <div class="s-stat"><div class="s-stat-val">${sessions.length}</div><div class="s-stat-lbl">เคสทั้งหมด</div></div>
     <div class="s-stat"><div class="s-stat-val">${sessions.length?Math.round(rosc/sessions.length*100):'—'}%</div><div class="s-stat-lbl">ROSC rate</div></div>
@@ -3135,8 +3248,8 @@ function renderAdminContent(){
   const sorted=[...sessions].sort((a,b)=>new Date(b.startTime||0)-new Date(a.startTime||0));
   $('admin-cases').innerHTML=sorted.map(s=>{
     const qs=s.quality?.qualScore;
-    const qBadge=qs>=2?'qb-good':qs===1?'qb-warn':'qb-bad';
-    const qLabel=qs>=2?'ดี':qs===1?'พอใช้':'ต้องปรับปรุง';
+    const qBadge=qs>=3?'qb-good':qs>=1?'qb-warn':'qb-bad';
+    const qLabel=qs>=3?'ดี':qs>=1?'พอใช้':'ต้องปรับปรุง';
     return `<div class="admin-case-item" onclick="openCaseDetail('${s.id}')">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div>
