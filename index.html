@@ -1829,7 +1829,7 @@ function updateAdrTimer(elSec){
 
 function checkProtocolAlerts(min,sec){
   const lastR=getLastRhythm();
-  const isShockable=lastR==='VF'||lastR==='pVT';
+  const isShockable=lastR==='VF'||lastR==='pVT'||lastR==='TdP';
   const banner=$('shockable-banner');
   // Show banner only if: shockable rhythm AND no defib given since last rhythm check
   if(isShockable && !shockableActive && !postDefibClear){
@@ -1855,7 +1855,7 @@ function dismissShockable(){
 
 function renderProtoPanel(min){
   const last=getLastRhythm();
-  const isShockable=last==='VF'||last==='pVT';
+  const isShockable=last==='VF'||last==='pVT'||last==='TdP';
   const adrOk=!S.adrLastTs||(Date.now()-S.adrLastTs)/60000<ADR_INTERVAL_MIN+0.5;
   const rows=[
     { lbl:'Adrenaline', ok:adrOk, bad:!adrOk },
@@ -1898,9 +1898,8 @@ function appendRow(i,tbody){
         ${isR?`<span class="rhythm-inline">
           <select class="r-sel" id="rh-${i}" onchange="saveRhythm(${i},true)">
             <option value="">— Rhythm —</option>
-            <option>VF</option><option>pVT</option><option>PEA</option>
-            <option>Asystole</option><option>NSR</option><option>AF</option>
-            <option>SVT</option><option>VT</option><option>Bradycardia</option>
+            <option>VF</option><option>pVT</option><option>TdP</option>
+            <option>PEA</option><option>Asystole</option>
           </select>
           <input type="number" class="r-inp" id="rr-${i}" placeholder="HR" inputmode="numeric" onchange="saveRhythm(${i},false)" title="HR">
           <input type="number" class="r-inp" id="re-${i}" placeholder="CO₂" inputmode="numeric" onchange="saveRhythm(${i},false)" title="EtCO2">
@@ -2474,6 +2473,22 @@ function endCPR(){
   }catch(e){} }
   buildSummary();
   showScreen('screen-summary');
+  // ── บันทึกอัตโนมัติทันทีที่จบเคส (ไม่ต้องรอกดบันทึก) ──
+  saveSession(S);
+  syncSession(S);
+}
+
+// ── บันทึกอัตโนมัติเมื่อแก้ไขในหน้า summary (เงียบๆ ไม่มี alert) ──
+let sumSaveTimer=null;
+function autoSaveSummary(){
+  if(!S.startTime||!S.stopTime) return;
+  clearTimeout(sumSaveTimer);
+  sumSaveTimer=setTimeout(()=>{
+    if($('s-note')) S.notes=$('s-note').value;
+    S.vitalROSC=vsRead('r');
+    saveSession(S);
+    syncSession(S);
+  },800);
 }
 
 function buildSummary(){
@@ -2506,7 +2521,7 @@ function buildQuality(totalMin){
 
   // 1) Defib ≤ 2 นาทีหลังเจอ shockable rhythm
   const shockMins=Object.entries(S.rhythmData)
-    .filter(([,v])=>v.rhythm==='VF'||v.rhythm==='pVT')
+    .filter(([,v])=>v.rhythm==='VF'||v.rhythm==='pVT'||v.rhythm==='TdP')
     .map(([k])=>parseInt(k));
   if(shockMins.length){
     applicable++;
@@ -2621,11 +2636,13 @@ function toggleCause(c,el){
   const i=S.causes.indexOf(c);
   if(i>=0){S.causes.splice(i,1);el.classList.remove('on');el.querySelector('.cause-chk').textContent='';}
   else{S.causes.push(c);el.classList.add('on');el.querySelector('.cause-chk').textContent='✓';}
+  autoSaveSummary();
 }
 function setOutcome(o){
   S.outcome=o;
   $('btn-rosc').classList.toggle('on',o==='ROSC');
   $('btn-dead').classList.toggle('on',o==='DEAD');
+  autoSaveSummary();
 }
 
 // ════════════════════════════════════════
@@ -2714,7 +2731,7 @@ function buildPrintPages(){
     const drugs=evsAt.filter(e=>isDrugT(e.type)).map(e=>e.detail).join(' · ');
     const procs=evsAt.filter(e=>!isDrugT(e.type)).map(e=>e.detail).join(' · ');
     const isR=min%2===0;
-    const shock=rh.rhythm==='VF'||rh.rhythm==='pVT';
+    const shock=rh.rhythm==='VF'||rh.rhythm==='pVT'||rh.rhythm==='TdP';
     const etLow=rh.etco2&&parseFloat(rh.etco2)<10;
     return `<tr style="${isR?'background:#f0f7ff':''}">
       <td style="text-align:center;font-weight:700;padding:3px 4px">${min}</td>
@@ -3057,7 +3074,7 @@ function cdDelEvent(i){ cdReadEvents(); cdEvents.splice(i,1); renderCdEvents(); 
 function renderCdRhythms(){
   const box=$('cd-rhythms'); if(!box) return;
   if(!cdRhythms.length){ box.innerHTML='<div class="cd-empty">— ยังไม่มี rhythm —</div>'; return; }
-  const opts=['','VF','pVT','PEA','Asystole','NSR','AF','SVT','VT','Bradycardia'];
+  const opts=['','VF','pVT','TdP','PEA','Asystole'];
   box.innerHTML=cdRhythms.map((r,i)=>{
     const sel=opts.map(o=>`<option value="${o}"${o===r.rhythm?' selected':''}>${o||'—'}</option>`).join('');
     return `<div class="cd-ev-row" data-idx="${i}">
@@ -3402,6 +3419,12 @@ document.addEventListener('DOMContentLoaded',()=>{
 
   // Apply saved timeline zoom
   applyTlZoom();
+
+  // บันทึกอัตโนมัติเมื่อพิมพ์ note / V/S ในหน้า summary
+  document.addEventListener('input',e=>{
+    if(!$('screen-summary').classList.contains('active')) return;
+    if(e.target.id==='s-note'||e.target.classList.contains('v-inp')) autoSaveSummary();
+  });
 
   // Online/offline
   window.addEventListener('online',()=>{ if($('offline-banner')) $('offline-banner').style.display='none'; });
