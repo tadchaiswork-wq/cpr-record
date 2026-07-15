@@ -67,6 +67,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-se
 .adr-blink-warn{animation:adr-pulse-warn .8s ease-in-out infinite!important}
 .adr-blink-danger{animation:adr-pulse-danger .45s ease-in-out infinite!important}
 
+/* ── Countdown ใหญ่กระพริบ ก่อนครบรอบ 2 นาที ── */
+#cycle-countdown{position:fixed;top:11%;left:50%;z-index:900;pointer-events:none;
+  display:none;flex-direction:column;align-items:center;
+  background:rgba(185,28,28,.93);color:#fff;padding:10px 30px 14px;border-radius:20px;
+  box-shadow:0 10px 34px rgba(0,0,0,.4);animation:cc-pulse .5s ease-in-out infinite}
+#cycle-countdown .cc-lbl{font-size:16px;font-weight:800;letter-spacing:.5px;white-space:nowrap}
+#cycle-countdown .cc-num{font-size:76px;font-weight:900;line-height:1.05;font-variant-numeric:tabular-nums}
+@keyframes cc-pulse{
+  0%,100%{opacity:1;transform:translateX(-50%) scale(1)}
+  50%{opacity:.7;transform:translateX(-50%) scale(1.07)}
+}
+
 /* ══ HOME/DASHBOARD ══ */
 #screen-home{overflow-y:auto;-webkit-overflow-scrolling:touch}
 .home-header{background:var(--navy);padding:16px 18px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0}
@@ -540,11 +552,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-se
     </div>
     <div class="elapsed" id="elapsed">00:00</div>
     <div class="hdr-btns">
+      <button class="hdr-btn btn-now" onclick="tlZoomAdj(-0.1)" title="ย่อตาราง">🔍−</button>
+      <button class="hdr-btn btn-now" onclick="tlZoomAdj(0.1)" title="ขยายตาราง">🔍+</button>
       <button class="hdr-btn btn-now" onclick="scrollToNow()">↓ Now<span class="kb-hint">N</span></button>
       <button class="hdr-btn btn-now" onclick="goHome()" title="กลับ Dashboard — CPR ยังบันทึกต่อ">🏠</button>
       <button class="hdr-btn btn-now" id="btn-fs" onclick="toggleFullscreen()" title="เต็มจอ">⛶</button>
       <button class="hdr-btn btn-end" onclick="endCPR()">■ END</button>
     </div>
+  </div>
+
+  <!-- Countdown ใหญ่ ก่อนครบรอบ 2 นาที -->
+  <div id="cycle-countdown">
+    <div class="cc-lbl">⚠️ RHYTHM CHECK ใน</div>
+    <div class="cc-num">10</div>
   </div>
 
   <div class="cpr-body">
@@ -660,7 +680,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-se
     </div>
 
     <div class="sum-card" id="rosc-card">
-      <h4>📊 V/S หลัง ROSC <span style="font-weight:500;text-transform:none;color:var(--muted)">· เติมค่า normal ให้แล้ว — กด −/+ หรือพิมพ์ปรับได้</span></h4>
+      <h4>📊 V/S หลัง ROSC <span style="font-weight:500;text-transform:none;color:var(--muted)">· กรอกเอง — ตัวเลขจางคือค่า normal · กด −/+ หรือพิมพ์ได้</span></h4>
       <div id="rosc-vs-container"></div>
     </div>
 
@@ -982,7 +1002,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-se
         </select>
       </div>
       <div id="cd-vs-wrap" style="display:none">
-        <div class="form-label">📊 V/S หลัง ROSC — กด −/+ หรือพิมพ์ปรับได้</div>
+        <div class="form-label">📊 V/S หลัง ROSC — กรอกเอง (ตัวเลขจางคือค่า normal) · กด −/+ หรือพิมพ์ได้</div>
         <div id="cd-vs-container"></div>
       </div>
       <div>
@@ -1030,6 +1050,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-se
 const ADR_INTERVAL_MIN = 4;
 const RHYTHM_INTERVAL_MIN = 2;
 const SOUND_WARN_SEC = 10;   // seconds before rhythm check
+const ADR_PREWARN_SEC = 20;  // เตือนก่อนถึงเวลา Adrenaline (วินาที)
+let adrPreWarnTs = null;     // กันเสียงเตือน adr ซ้ำในรอบเดียวกัน
 
 // ════════════════════════════════════════
 // STATE
@@ -1621,6 +1643,7 @@ function tick(){
   if(elSec!==lastSecond){
     lastSecond=elSec;
     checkSoundAlerts(elSec,min,sec);
+    updateCycleCountdown(elSec);
     checkProtocolAlerts(min,sec);
     if(min!==S.currentMin){
       S.currentMin=min;
@@ -1631,6 +1654,31 @@ function tick(){
     updateAdrTimer(elSec);
     if(elSec%30===0 && elSec>0) autoSave(); // save every 30 seconds
   }
+}
+
+// ── เลขนับถอยหลังใหญ่กระพริบ: 10 วิสุดท้ายก่อนครบรอบ 2 นาที ──
+function updateCycleCountdown(elSec){
+  const el=$('cycle-countdown'); if(!el) return;
+  const cycleLen=RHYTHM_INTERVAL_MIN*60;
+  const left=cycleLen-(elSec%cycleLen);
+  if(elSec>0 && left<=SOUND_WARN_SEC){
+    el.querySelector('.cc-num').textContent=left;
+    el.style.display='flex';
+  } else {
+    el.style.display='none';
+  }
+}
+
+// ── Zoom ตาราง timeline (จำค่าไว้ในเครื่อง) ──
+let tlZoom=parseFloat(localStorage.getItem('cpr_tl_zoom'))||1;
+function applyTlZoom(){
+  const t=document.querySelector('.tl-table');
+  if(t) t.style.zoom=tlZoom;
+}
+function tlZoomAdj(d){
+  tlZoom=Math.min(2,Math.max(0.6,+(tlZoom+d).toFixed(2)));
+  try{ localStorage.setItem('cpr_tl_zoom',tlZoom); }catch(e){}
+  applyTlZoom();
 }
 
 function checkSoundAlerts(elSec,min,sec){
@@ -1686,6 +1734,19 @@ function updateAdrTimer(elSec){
     rem.className='reminder rem-warn';
     $('btn-adr').classList.remove('adr-blink-danger');
     $('btn-adr').classList.add('adr-blink-warn');
+  } else if(remaining<=ADR_PREWARN_SEC){
+    // ── เตือนล่วงหน้าก่อนถึงเวลา Adrenaline 20 วินาที ──
+    const rs=Math.max(1,Math.ceil(remaining));
+    sub.textContent=`⏳ เตรียมยา! อีก ${rs} วิ`;
+    rem.textContent=`ใกล้ถึงเวลา Adrenaline #${S.adrCount+1} — เตรียม syringe + flush`;
+    rem.className='reminder rem-warn';
+    $('btn-adr').classList.remove('adr-blink-danger');
+    $('btn-adr').classList.add('adr-blink-warn');
+    // เสียงเตือนครั้งเดียวตอนเข้า 20 วิ
+    if(adrPreWarnTs!==S.adrLastTs){
+      adrPreWarnTs=S.adrLastTs;
+      beep(700,.12,.35); setTimeout(()=>beep(700,.12,.35),200);
+    }
   } else {
     const rm=Math.floor(remaining/60), rs=Math.floor(remaining%60);
     sub.textContent=`Next: ${rm}:${String(rs).padStart(2,'0')}`;
@@ -2357,8 +2418,7 @@ function buildSummary(){
   buildDrugList();
   buildCauses();
   buildPrintTimeline();
-  vsLoad('r',S.vitalROSC);   // โหลดค่าที่เคยกรอก (ถ้ามี)
-  vsFillDefaults('r');       // ช่องที่ว่าง → เติมค่า normal ให้เลย
+  vsLoad('r',S.vitalROSC);   // โหลดค่าที่เคยกรอก (ถ้ามี) — ช่องที่ไม่เคยกรอกปล่อยว่าง
 }
 
 function buildQuality(totalMin){
@@ -2512,7 +2572,6 @@ function vsLoad(p,v){
 function cdOutcomeChanged(){
   const on=$('cd-outcome').value==='ROSC';
   $('cd-vs-wrap').style.display=on?'block':'none';
-  if(on) vsFillDefaults('cdv');
 }
 
 function buildPrintTimeline(){ /* legacy — replaced by buildPrintPages() */ }
@@ -3227,6 +3286,9 @@ document.addEventListener('DOMContentLoaded',()=>{
 
   // Init audio on first touch
   document.addEventListener('touchstart',()=>{ if(!audioCtx) initAudio(); },{once:true,passive:true});
+
+  // Apply saved timeline zoom
+  applyTlZoom();
 
   // Online/offline
   window.addEventListener('online',()=>{ if($('offline-banner')) $('offline-banner').style.display='none'; });
